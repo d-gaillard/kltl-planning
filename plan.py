@@ -135,6 +135,12 @@ def negmu(i, PWL, bloat, A, b):
         disjunctions.append(Conjunction(conjunctions))
     return Disjunction(disjunctions)
 
+def knows(i, zphi1s, zphi2s, PWL):
+    conjunctions = []
+    for j in range(len(PWL)-1):
+        conjunctions.append(Disjunction([zphi2s[j], Conjunction([zphi1s[j], zphi2s[j]])]))
+    return Conjunction(conjunctions)
+
 def add_space_constrs(model, x, lim, bloat=0):
     xlim, ylim = lim
     
