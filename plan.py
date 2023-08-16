@@ -1,5 +1,10 @@
+"""
+Modified PWL code; based on STLPlanning's toolbox.
+"""
+
 import numpy as np
 from math import *
+from gurobipy import *
 from gurobipy import GRB, Model
 import time
 
@@ -27,19 +32,19 @@ def L1Norm(model, x):
     abs_x = [abs_x[i] for i in range(len(abs_x))]
     for i in range(len(x)):
         model.addConstr(xvar[i] == x[i])
-        model.addConstr(abs_x[i] == abs_x(xvar[i]))
+        model.addConstr(abs_x[i] == abs_(xvar[i]))
     return sum(abs_x)
 
 class Conjunction(object):
-    def __init__(self, dependents=[]):
+    def __init__(self, deps=[]):
         super(Conjunction, self).__init__()
-        self.dependents = dependents
+        self.deps = deps
         self.constraints = []
     
 class Disjunction(object):
-    def __init__(self, dependents=[]):
+    def __init__(self, deps=[]):
         super(Disjunction, self).__init__()
-        self.dependents = dependents
+        self.deps = deps
         self.constraints = []
 
 def Intersection(a,b,c,d):
@@ -67,7 +72,8 @@ def eventually(i, a, b, zphis, PWL):
         tj = PWL[j][1]
         tj1 = PWL[j+1][1]
         disjunctions.append(Conjunction([Intersection(tj, tj1, ti1 + a, ti + b), zphis[j]]))
-        
+    return Conjunction([z_interval_width, Disjunction(disjunctions)])
+   
 def bounded_eventually(i, a, b, zphis, PWL, tmax):
     ti = PWL[i][1]
     ti1 = PWL[i+1][1]
@@ -112,7 +118,7 @@ def release(i, a, b, zphi1s, zphi2s, PWL):
 
 def mu(i, PWL, bloat, A, b):
     bloat = np.max([0, bloat])
-    b = b.rehape(-1)
+    b = b.reshape(-1)
     num_edges = len(b)
     conjunctions = []
     for e in range(num_edges):
@@ -223,11 +229,14 @@ def handle_spec_tree(spec, PWL, bloat, size):
         spec.zs = [bounded_eventually(i, spec.info['int'][0], spec.info['int'][1], spec.deps[0].zs, PWL, spec.info['tmax']) for i in range(len(PWL)-1)]
     elif spec.op == 'A':
         spec.zs = [always(i, spec.info['int'][0], spec.info['int'][1], spec.deps[0].zs, PWL) for i in range(len(PWL)-1)]
+    elif spec.op == 'K':
+        spec.zs = [knows(i, spec.deps[0].zs, spec.deps[1].zs, PWL) for i in range(len(PWL)-1)]
     else:
         raise ValueError('wrong op code')
 
 def gen_CD_tree_constrs(model, root):
-    if not hasattr(root, 'deps'): return [root,]
+    if not hasattr(root, 'deps'): 
+        return [root,]
     else:
         if len(root.constraints) > 0:
             return root.constraints
@@ -251,94 +260,100 @@ def add_CD_tree_constrs(model, root):
     for con in constrs:
         model.addConstr(con >= 0)
         
-def plan(x0s, specs, bloat, limits=None, num_segs=None, tasks=None, vmax=3, MIPGap=1e-4, max_segs=None, tmax=None, hard_goals=None, size=0.11*4/2):
+def plan(x0s, specs, bloat, limits=None, num_segs=None, tasks=None, vmax=3., MIPGap=1e-4, max_segs=None, tmax=None, hard_goals=None, size=0.11*4/2):
     if num_segs is None:
         min_segs = 1
-        assert max_segs != None
-    else: 
+        assert max_segs is not None
+    else:
         min_segs = num_segs
         max_segs = num_segs
-    
+
     for num_segs in range(min_segs, max_segs+1):
         for spec in specs:
             clear_spec_tree(spec)
-            
+
         if tasks:
             for task in tasks:
-                for t in tasks:
+                for t in task:
                     clear_spec_tree(t)
-        
+
         print('----------------------------')
         print('num_segs', num_segs)
 
         PWLs = []
-        m = Model('xref')
+        m = Model("xref")
+        # m.setParam(GRB.Param.OutputFlag, 0)
         m.setParam(GRB.Param.IntFeasTol, IntFeasTol)
         m.setParam(GRB.Param.MIPGap, MIPGap)
-        
+        # m.setParam(GRB.Param.NonConvex, 2)
+        # m.getEnv().set(GRB_IntParam_OutputFlag, 0)
+
         for idx_a in range(len(x0s)):
             x0 = x0s[idx_a]
             x0 = np.array(x0).reshape(-1).tolist()
             spec = specs[idx_a]
-            
+
             dims = len(x0)
-            
+
             PWL = []
             for i in range(num_segs+1):
                 PWL.append([m.addVars(dims, lb=-GRB.INFINITY), m.addVar()])
             PWLs.append(PWL)
             m.update()
-            
+
+            # the initial constriant
             m.addConstrs(PWL[0][0][i] == x0[i] for i in range(dims))
             m.addConstr(PWL[0][1] == 0)
-            
-            if hard_goals != None:
+
+            if hard_goals is not None:
                 goal = hard_goals[idx_a]
                 m.addConstrs(PWL[-1][0][i] == goal[i] for i in range(dims))
-                
-            if limits != None:
+
+            if limits is not None:
                 add_space_constrs(m, [P[0] for P in PWL], limits)
-                
+
             add_v_constrs(m, PWL, vmax=vmax)
             add_t_constrs(m, PWL, tmax)
-            
+
             handle_spec_tree(spec, PWL, bloat, size)
             add_CD_tree_constrs(m, spec.zs[0])
-            
-        if tasks != None:
+
+        if tasks is not None:
             for idx_agent in range(len(tasks)):
                 for idx_task in range(len(tasks[idx_agent])):
                     handle_spec_tree(tasks[idx_agent][idx_task], PWLs[idx_agent], bloat, size)
-                    
-                conjunctions = []
-                for idx_task in range(len(tasks[0])):
-                    disjunctions = [tasks[idx_agent][idx_task].zs[0] for idx_agent in range(len(tasks))]
-                    conjunctions.append(Disjunction(disjunctions))
-                z = Conjunction(conjunctions)
-                add_CD_tree_constrs(m, z)
-            
-            add_mut_clearance_constr(m, PWLs, bloat)
-            
-            obj = sum([PWL[-1][1] for PWL in PWLs])
-            m.setObjective(obj, GRB.MINIMIZE)
-            
-            m.write('test.lp')
-            print('NumBinVars: %d' %m.getAttr('NumBinVars'))
-            
-            try:
-                start = time.time()
-                m.optimize
-                end = time.time()
-                print('sovling it takes %.3f s'%(end - start))
-                PWLs_output = []
-                for PWL in PWLs:
-                    PWL_output = []
-                    for P in PWL:
-                        for P in PWL:
-                            PWL_output.append([[P[0][i].X for i in range(len(P[0]))], P[1].X])
-                        PWLs_output.append(PWL_output)
-                    m.dispose()
-                    return PWLs_output
-            except Exception as e:
-                m.dispose()
-                return [None,]
+
+            conjunctions = []
+            for idx_task in range(len(tasks[0])):
+                disjunctions = [tasks[idx_agent][idx_task].zs[0] for idx_agent in range(len(tasks))]
+                conjunctions.append(Disjunction(disjunctions))
+            z = Conjunction(conjunctions)
+            add_CD_tree_constrs(m, z)
+
+        add_mut_clearance_constr(m, PWLs, bloat)
+
+        # obj = sum([L1Norm(m, _sub(PWL[i][0], PWL[i+1][0])) for PWL in PWLs for i in range(len(PWL)-1)])
+        obj = sum([PWL[-1][1] for PWL in PWLs])
+        m.setObjective(obj, GRB.MINIMIZE)
+
+        m.write("test.lp")
+        print('NumBinVars: %d'%m.getAttr('NumBinVars'))
+
+        # m.computeIIS()
+        # import ipdb;ipdb.set_treace()
+        try:
+            start = time.time()
+            m.optimize()
+            end = time.time()
+            print('sovling it takes %.3f s'%(end - start))
+            PWLs_output = []
+            for PWL in PWLs:
+                PWL_output = []
+                for P in PWL:
+                    PWL_output.append([[P[0][i].X for i in range(len(P[0]))], P[1].X])
+                PWLs_output.append(PWL_output)
+            m.dispose()
+            return PWLs_output
+        except Exception as e:
+            m.dispose()
+    return [None,]
